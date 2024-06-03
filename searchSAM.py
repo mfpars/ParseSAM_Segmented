@@ -10,6 +10,11 @@ import pandas as pd
 from pandas import json_normalize
 import re
 
+
+import matplotlib.pyplot as plt
+import seaborn as sns 
+from matplotlib.lines import Line2D
+
 #%% Define functions
 
 def searchSAM(base_dir,samfilename,reference_name, term='segmented'):
@@ -128,8 +133,8 @@ def copyback_filter(segments_df):
         # bit 32 (0x20) indicates whether SEQ of the next segment in the read is reverse complemented
 
 
-def melt_segments(copyback_df):
-    # copyback_df is a dataframe in SAM format
+def melt_segments(SAM_df):
+    # SAM_df is a dataframe in SAM format
     
     # Helper function to extract tag values
     def tagn(TAGS,searchtag):
@@ -138,15 +143,15 @@ def melt_segments(copyback_df):
                 return int(item.split(':')[2]) # tag format is FI:i:n, where n is the segment id
 
     # Add the segment id (FI) and total segment count (TC) from the tags as new columns in the df
-    copyback_df['FI'] = copyback_df['Tags'].apply(lambda tags: tagn(tags, 'FI'))
-    copyback_df['TC'] = copyback_df['Tags'].apply(lambda tags: tagn(tags, 'TC'))
+    SAM_df['FI'] = SAM_df['Tags'].apply(lambda tags: tagn(tags, 'FI'))
+    SAM_df['TC'] = SAM_df['Tags'].apply(lambda tags: tagn(tags, 'TC'))
 
     # Initialize lists/columns of outputs
     # Initialize new columns
-    # copyback_df['Start'] = 0
-    # copyback_df['End'] = 0
-    # copyback_df['Length'] = 0
-    # copyback_df['RevComp'] = False
+    # SAM_df['Start'] = 0
+    # SAM_df['End'] = 0
+    # SAM_df['Length'] = 0
+    # SAM_df['RevComp'] = False
     # melted_reads = []
     # MINDs = [] # Mutation, Insertion, (N)recombination, Deletions
 
@@ -201,20 +206,20 @@ def melt_segments(copyback_df):
         return seglength, seg_mind_pos
 
     # Vector operations on Pandas columns to calculate Start/End/Length/RevComp
-    copyback_df['Start'] = copyback_df['POS'].astype(int)
+    SAM_df['Start'] = SAM_df['POS'].astype(int)
     
-    chunks = copyback_df['CIGAR'].apply(parse_cigar)
+    chunks = SAM_df['CIGAR'].apply(parse_cigar)
     segparse_results = chunks.apply(segparse)
     aligned_length, relative_mind_pos = zip(*segparse_results)
     
-    copyback_df['End'] = copyback_df['Start'] + aligned_length
-    copyback_df['Length'] = aligned_length
-    copyback_df['RevComp'] = (copyback_df['FLAG'] & 0x10) != 0
+    SAM_df['End'] = SAM_df['Start'] + aligned_length
+    SAM_df['Length'] = aligned_length
+    SAM_df['RevComp'] = (SAM_df['FLAG'] & 0x10) != 0
     
     relative_minds_df = pd.DataFrame({'minds': relative_mind_pos})
-    relative_minds_df['QNAME'] = copyback_df['QNAME'].values
-    relative_minds_df['Seg'] = copyback_df['FI'].values
-    relative_minds_df['POS'] = copyback_df['POS'].values
+    relative_minds_df['QNAME'] = SAM_df['QNAME'].values
+    relative_minds_df['Seg'] = SAM_df['FI'].values
+    relative_minds_df['POS'] = SAM_df['POS'].values
     
     # Explode the 'minds' column to separate each dictionary into its own row
     relative_minds_exploded = relative_minds_df.explode('minds')
@@ -226,201 +231,246 @@ def melt_segments(copyback_df):
     MINDs['Start'] = MINDs['Start'] + MINDs['POS'] # update start to genome location
     MINDs['End'] = MINDs['End'] + MINDs['POS'] # update end to genome location
     MINDs.drop(columns='POS', inplace=True)
-    return copyback_df, MINDs.dropna()
+    return SAM_df, MINDs.dropna()
 
-
-    # # Iterate over the grouped DataFrame by QNAME
-    # for readname, read_df in copyback_df.groupby('QNAME'):
-    #     for _, row in read_df.iterrows():
-    #         chunks = parse_cigar(row['CIGAR'])
-    #         start = int(row['POS'])
-    #         aligned_length, relative_mind_pos = segparse(chunks)
-    #         end = start + aligned_length
-
-    #         revcomp = bool(row['FLAG'] & 0x10)
-
-    #         read = {
-    #             'QNAME': row['QNAME'],
-    #             'TC': row['TC'],
-    #             'Seg': row['FI'],
-    #             'RevComp': revcomp,
-    #             'Start': start,
-    #             'Length': aligned_length,
-    #             'End': end
-    #         }
-    #         melted_reads.append(read)
-
-    #         if relative_mind_pos:
-    #             mind_pos = [{
-    #                 'QNAME': row['QNAME'],
-    #                 'Seg': row['FI'],
-    #                 'MINDtype': mind_event['MINDtype'],
-    #                 'Start': start + mind_event['Start'],
-    #                 'Length': mind_event['Length'],
-    #                 'End': start + mind_event['End']
-    #             } for mind_event in relative_mind_pos]
-    #             MINDs.extend(mind_pos)
-
-    # return melted_reads, MINDs
-
+#%%
+def plotreads(base_dir, samfilename, reference_name, parsed_reads_df, MINDs=[]):
+    ### Plot set up
+            
+        ## Define a y-value to space out the reads on the plot
     
-    # for readname in copyback_df['QNAME'].unique():
-    #     read_df = copyback_df.loc[copyback_df['QNAME']==readname] # subset just the lines associated with this read
-    #     # TC = read_df['TC'].unique() # identify the total number of mapped segments associated with this read
+        read_ind = {qname: idx for idx, qname in enumerate(parsed_reads_df['QNAME'].unique())}
+        parsed_reads_df['Read_Index'] = [read_ind[row['QNAME']] for idx, row in parsed_reads_df.iterrows()]
         
+        unique_reads = parsed_reads_df.drop_duplicates('QNAME')[['QNAME','TC']]
+        unique_reads['read_y'] = unique_reads['TC'].cumsum()
+        read_y = {row['QNAME']: row['read_y'] for ind, row in unique_reads.iterrows()}
+        parsed_reads_df['y'] = [4*read_y[row['QNAME']] + row['FI'] for idx, row in parsed_reads_df.iterrows()]
         
-    #     # Parse the CIGAR string
-    #     chunks = {}
-    #     for seg in read_df.index:
+        # parsed_reads_df['y'] = 50*parsed_reads_df['Read_Index'] + 1*parsed_reads_df['FI']
+        y_seg = {(row['QNAME'], row['FI']): row['y'] for idx, row in parsed_reads_df[['QNAME','FI','y']].iterrows()}
+        # parsed_reads_df['y'] = [y_read[row['QNAME']] + 6*int(row['FI']) for idx, row in parsed_reads_df.iterrows()]
+    
+        ## Define figure parameters
+
+        width = (parsed_reads_df['End'].max()) * 0.01 
+        height = len(parsed_reads_df) * 0.05 # taller plot if more segments to plot
+        fig, ax = plt.subplots(figsize=(width, height), layout="constrained")
+        colors = sns.color_palette(# palette = 'gist_earth',
+                                   n_colors = 5)
+        strandcolor = {True: colors[0], False: 'black'} # set up dict to define color based on RevComp being true or false
+    
+    ###  Plot segments and connectors
+    
+        for index, row in parsed_reads_df.iterrows():
+            ax.hlines(y=row['y'], xmin=row['Start'], 
+                       xmax=row['End'], 
+                       color=strandcolor[row['RevComp']],
+                       linewidth = 0.5,
+                       )
+        
+        for qname in parsed_reads_df['QNAME'].unique():
             
-    #         row = read_df.loc[seg]
             
-    #         # Regex pattern to split at the border between letters and numbers,
-    #         # i.e. between each alignment section (soft padding, matching, deletions, etc)
-    #         cigarsplit_regex = r'(?<=[A-Za-z])(?=\d)'
-    #         cigar_chunks = re.split(cigarsplit_regex, row['CIGAR'])
-            
-    #         # Regex pattern to split at the border between numbers and letters,
-    #         # i.e. to separate the number of bp and the alignment type
-    #         chunksplit = r'(?<=\d)(?=[A-Za-z])'
-    #         chunks[seg] = ([re.split(chunksplit,chunk) for chunk in cigar_chunks])
-            
-    #         # identify the start and end points of the aligned section of sequence
-            
-    #         def segparse(chunked_cigar):
-    #             seglength = 0
-    #             for idx, item in enumerate(chunked_cigar):
-    #                 event_length = int(item[0])
-    #                 if ('M' in item) or ('X' in item): # If matched alignment or mutation aligmnment
-    #                     seglength += event_length # Add the number of aligned nucleotides to seglength
-    #                     start_idx = idx
-    #                     break 
+            # connect = [] # empty list to populate with segment connector
+            for i in parsed_reads_df.loc[parsed_reads_df['QNAME']==qname]['FI']: 
+                # TC is total number of segments
+                # FI (index of segment in read) is 1-indexed
                 
-    #             # initiate dataframe to save positional information about mutations/insertions/deletions
-    #             seg_mind_pos = [] 
                 
-    #             # Continue counting aligned nucleotides from the determined alignment start
-    #             for idx, item in enumerate(chunked_cigar[start_idx+1:]):
-    #                 event_length = int(item[0])
-    #                 if 'H' in item: #hard clip, indicates end of segment alignment
-    #                     break
-    #                 if ('X' in item) or ('D' in item) or ('N' in item) or ('M' in item):
-    #                     # mutations, deletions/splices, and matches continue the count along the reference genome
-                        
-    #                     if not ('M' in item): # not an exact match, record MIND event
-    #                         seg_mind_pos.append({'MINDtype': item[1],
-    #                                              'Start': seglength, # start position of event relative to segment alignment start
-    #                                              'Length': event_length,
-    #                                              'End': seglength+event_length
-    #                                              })
-                        
-    #                     seglength += event_length
-                        
-    #                 if ('I' in item) or ('S' in item): 
-    #                     # insertions don't add to the count in the reference genome position
-    #                     # but still want to save this information.
-    #                     # Virema records large insertions as soft pads ('S') in the CIGAR string
-                        
-    #                     seg_mind_pos.append({'MINDtype': item[1],
-    #                                          'Start': seglength, # start position of event relative to segment alignment start
-    #                                          'Length': event_length,
-    #                                          'End': seglength # relative to reference genome, insertion starts where it ends
-    #                                          })
-                        
-    #             return seglength, seg_mind_pos
-            
-    #         start = int(row['POS'])
-    #         aligned_length, relative_mind_pos = segparse(chunks[seg])
-    #         end = start + aligned_length          
-            
-    #         # Flag notes:
-    #             # bit 16 (0x10) indicates whether SEQ is reverse complemented
-    #             # bit 32 (0x20) indicates whether SEQ of the next segment in the read is reverse complemented
-            
-    #         flag = int(read_df.loc[seg]['FLAG'])
-    #         if flag & 0x10: # segment maps to reverse complement
-    #             revcomp = True
-    #         else: 
-    #             revcomp = False
+                segment = parsed_reads_df.loc[(parsed_reads_df['QNAME']==qname) &
+                                              (parsed_reads_df['FI']==i)]
                 
-    #         read = {'QNAME': row['QNAME'],
-    #                 'TC': row['TC'],
-    #                 'Seg': row['FI'],
-    #                 'RevComp': revcomp,
-    #                 'Start': start,
-    #                 'Length': aligned_length,
-    #                 'End': end
-    #                 }
-            
-    #         # accumulate read alignment positional info of each segment 
-    #         melted_reads.append(read)
-            
-    #         if len(relative_mind_pos) > 0: # if any mismatch/insertion/deletino events were identified and saved
-    #             mind_pos = [{'QNAME': row['QNAME'],
-    #                          'Seg': row['FI'],
-    #                          'MINDtype': mind_event['MINDtype'],
-    #                          'Start': start + mind_event['Start'],
-    #                          'Length': mind_event['Length'],
-    #                          'End': start + mind_event['End']
-    #                          } for mind_event in relative_mind_pos
-    #                         ]
-    #             # accumulate MIND positional info of each segment 
-    #             MINDs += mind_pos
+                nextsegment = parsed_reads_df.loc[(parsed_reads_df['QNAME']==qname) &
+                                              (parsed_reads_df['FI']==i+1)]
                 
+                if nextsegment.empty: # reached the end of the read
+                
+                    # write read index on the plot
+                    # ax.text(0, segment['y'], read_ind[segment['QNAME'].values[0]],
+                    #         horizontalalignment='right',
+                    #         verticalalignment='center',
+                    #         **{'fontfamily': 'sans-serif','fontsize': 8})
+                
+                    continue
+                
+                # find start point of connector: 
+                    # the End of a forward strand segment, or
+                    # the Start of a reverse-complemented segment
+                revcomp = segment['RevComp'].iloc[0]
+                if revcomp:
+                    connectstart = segment['Start'].iloc[0]
+                else:
+                    connectstart = segment['End'].iloc[0]
+                
+                # find end point of connector: 
+                    # the Start of a forward-stranded next segment, or
+                    # the End of a reverse-complemented next segment
+                revcomp_next = nextsegment['RevComp'].iloc[0]
+                if revcomp_next:
+                    connectend = nextsegment['End'].iloc[0]
+                else:
+                    connectend = nextsegment['Start'].iloc[0]
+                
+                startpoint = {'QNAME': qname,
+                              'pos': connectstart,
+                              'y': segment['y']
+                              }
+                endpoint = {'QNAME': qname,
+                            'pos': connectend,
+                            'y': nextsegment['y']
+                            }
+                connector = pd.DataFrame([startpoint,endpoint])
+                 
+                ax.plot(connector['pos'],connector['y'],
+                        # linestyle = '--',
+                        dashes = [2,1],
+                        linewidth = 0.25,
+                        color = 'grey',
+                        marker = "none"
+                     )              
+                # connect.append(startpoint)
+                # connect.append(endpoint)
+            
+                
+            
+    ### Plot mutation/insertion/deletion events
+    
+        if not MINDs.empty:  # if events were identified
+            MINDs['y'] = [y_seg[(row['QNAME'],row['Seg'])] for idx, row in MINDs.iterrows()]
+            
+            # Plot deletions as colored horizontal bars over the aligned segment
+            Deletions = MINDs.loc[(MINDs['MINDtype']=='D') | (MINDs['MINDtype'] == 'N')]
+            for index, row in Deletions.iterrows():
+                ax.hlines(y=row['y'], xmin=row['Start'], xmax=row['End'], 
+                           color=colors[1],
+                           linewidth=1,
+                           linestyle = ':',
+                           gapcolor='grey',
+                           alpha = 0.6,
+                           # ax = ax
+                           )
+            
+            # Plot Insertions and Mutations as point markers over the aligned segment bars
+            MIN = MINDs.loc[(MINDs['MINDtype'] == 'X') | (MINDs['MINDtype'] == 'S')
+                               | (MINDs['MINDtype'] == 'I')]
+            
+            sns.scatterplot(data = MIN,
+                            x = 'Start',
+                            y = 'y',
+                            hue = 'MINDtype',
+                            style = 'MINDtype',
+                            hue_order = ['X','S','I'],
+                            markers = {'X': 'X', 'S': 'o', 'I': 's'},
+                            ax = ax,
+                            palette = colors[2:],
+                            s = 5, # adjust size of the MIND markers on the plot
+                            alpha = 0.3, # make transparent to visualize lines underneath
+                            )
+            
+    ### Beautify the plot for visual clarity and save figure
+        
+        legend_elements = [Line2D([0], [0], color=colors[0], lw=2, label='Reverse complement mapped'),
+                           Line2D([0], [0], color='black', lw=2, label='Forward strand mapped'),
+                           Line2D([0], [0], color='grey', lw=1, label='Segment connection',
+                                  linestyle = '--'),
+                           Line2D([0], [0], color=colors[1], lw=4, linestyle = ':',
+                                  gapcolor='grey', alpha = 0.6, label='Deletion'),
+                           Line2D([0], [0], marker='x', color=colors[2], label='Mutation',
+                                  lw = 0, markersize=5, alpha = 0.3),
+                           Line2D([0], [0], marker='o', color=colors[3], label='Soft pad',
+                                  lw = 0, markersize=5, alpha = 0.3),
+                           Line2D([0], [0], marker='s', color=colors[4], label='Insertion',
+                                  lw = 0, markersize=5, alpha = 0.3),
+                           ]
+    
+        ax.legend(loc='lower left', bbox_to_anchor=(0, 1, 1, 0.25),
+                  frameon = False,
+                  handles=legend_elements
+                  )
+        ax.set_xlabel('Genome Position')
+        ax.set_ylabel('Read')
+        
+        # Set y-ticks and labels
+        first_seg_y = [parsed_reads_df[parsed_reads_df['QNAME'] == qname].iloc[0]['y'] for qname in parsed_reads_df['QNAME'].unique()]
+        ax.set_yticks(first_seg_y, labels = [read_ind[qname] for qname in parsed_reads_df['QNAME'].unique()])
+        ax.tick_params(width = 0.5, color = 'grey')
+        ax.set_ylim(0,parsed_reads_df['y'].max())
+        # ax.set_yticklabels(read_ind[qname] for qname in parsed_reads_df['QNAME'].unique())
+        # ax.set_yticks([]) # remove arbitrary y-axis ticks and tick-labels, which are just counting arbitrary spacing on the plot
+        ax.spines['bottom'].set_position('zero')
+        ax.spines['left'].set_position('zero')
+        sns.despine(ax=ax,top = True, right = True, left = True, bottom = False)
 
         
-    # return melted_reads, MINDs
-
-  
-# def calc_dsRNA(melted_reads_df, ):
-#     # Filter melted_reads dataframe for reads containing doublestranded regions
-#     # (i.e. copybacks), and calculate how many double-stranded base pairs the read has.
-    
-#     readnames = (q for q in melted_reads_df['QNAME'].unique()) # collect unique readnames
-    
-#     for q in readnames: # for each read
-#         read_rows = melted_reads_df.loc[melted_reads_df['QNAME'] == q]
+        # Add verticle grid lines at x-tick positions
+        ax.grid(visible = True, axis = 'x', color='grey', linestyle='-', linewidth=2,
+                alpha = 0.2)
         
-#         # if the read contains both forward and reverse segments (RevComp = True for one segment,
-#             # RevComp = False for another segment), there is a chance of being double-stranded
-#         if (True in read_rows['RevComp']) and (False in read_rows['RevComp']):
-#             TC = read_rows.loc[0,'TC'] # total number of segments in the read
+        # Adjust subplot parameters to make room for labels
+        # fig.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.1)
+        
+        outfolder = os.path.join(base_dir, samfilename[:-4])
+        if not os.path.exists(outfolder):
+            os.makedirs(outfolder)
+        fig.savefig(os.path.join(outfolder,reference_name + '_Copyback_diagram.pdf'),bbox_inches = 'tight'
+                    )
+        
+        
+        ### Save csv file to refer plot read index to read name
+        
+        parsed_reads_df.to_csv(os.path.join(outfolder,reference_name+'Segmented_reads_parsed.csv'))
+
+#%%    
+def calc_dsRNA(melted_reads_df, ):
+    # Filter melted_reads dataframe for reads containing doublestranded regions
+    # (i.e. copybacks), and calculate how many double-stranded base pairs the read has.
+    
+    readnames = (q for q in melted_reads_df['QNAME'].unique()) # collect unique readnames
+    
+    for q in readnames: # for each read
+        read_rows = melted_reads_df.loc[melted_reads_df['QNAME'] == q]
+        
+        # if the read contains both forward and reverse segments (RevComp = True for one segment,
+            # RevComp = False for another segment), there is a chance of being double-stranded
+        if (True in read_rows['RevComp']) and (False in read_rows['RevComp']):
+            TC = read_rows.loc[0,'TC'] # total number of segments in the read
             
-#             for seg in range(1,TC): # segment is 1-indexed, so start at 1
+            for seg in range(1,TC): # segment is 1-indexed, so start at 1
                
-#                 # if this segment is in the dataframe and if there is a next segment:
-#                     # (the segment seg may map to a different genome as a result of recombination,
-#                     # and therefore not show up in this dataframe)
-#                 if (seg in read_rows['Seg']) and (seg+1 in read_rows['Seg']):
-#                     segment = read_rows.loc[read_rows['Seg'] == seg]
-#                     next_segment = read_rows.loc[read_rows['Seg'] == seg+1]
+                # if this segment is in the dataframe and if there is a next segment:
+                    # (the segment seg may map to a different genome as a result of recombination,
+                    # and therefore not show up in this dataframe)
+                if (seg in read_rows['Seg']) and (seg+1 in read_rows['Seg']):
+                    segment = read_rows.loc[read_rows['Seg'] == seg]
+                    next_segment = read_rows.loc[read_rows['Seg'] == seg+1]
                     
-#                     ''' Several possible conditions lead to hairpin potential (i.e. double-stranded base pairs) within the read:
-#                             1. Segment 1 is reverse-complemented and segment 2 is forward-stranded, and
-#                                 a. The start of segment 2 is between start/end of segment 1, or
-#                                 b. The start of segment 1 is between start/end of segment 2
+                    ''' Several possible conditions lead to hairpin potential (i.e. double-stranded base pairs) within the read:
+                            1. Segment 1 is reverse-complemented and segment 2 is forward-stranded, and
+                                a. The start of segment 2 is between start/end of segment 1, or
+                                b. The start of segment 1 is between start/end of segment 2
                                 
-#                             2. Segment 1 is forward-stranded and segment 2 is reverse-complemented, and
-#                                 a. The start of segment 2 is between start/end of segment 1, or
-#                                 b. The start of segment 1 is between start/end of segment 2
+                            2. Segment 1 is forward-stranded and segment 2 is reverse-complemented, and
+                                a. The start of segment 2 is between start/end of segment 1, or
+                                b. The start of segment 1 is between start/end of segment 2
                         
-#                         (note, the 'start' and 'end' of segments listed here refers to the start/end of the matching aligned region,
-#                          so does not include soft pads or hard-clipped regions)
+                        (note, the 'start' and 'end' of segments listed here refers to the start/end of the matching aligned region,
+                          so does not include soft pads or hard-clipped regions)
             
-#                     '''
-#                     if segment['RevComp'] != next_segment['RevComp']: # must map to opposite strands to be complementary
+                    '''
+                    if segment['RevComp'] != next_segment['RevComp']: # must map to opposite strands to be complementary
                        
-#                         if (segment['Start'] <= next_segment['Start'] <= segment['End']): # condition a.
+                        if (segment['Start'] <= next_segment['Start'] <= segment['End']): # condition a.
+                            
                         
                         
                         
+                            #ds_region_start = min(segment['Start'], next_segment['Start']) # leftmost coordinate; depends on RevComp of segments
+                            # ds_region_end = min()
+                            # ds_region = {'Start': ds_region_start, 'ds_length (bp)': next_segment['Start']
                         
-#                             #ds_region_start = min(segment['Start'], next_segment['Start']) # leftmost coordinate; depends on RevComp of segments
-#                             # ds_region_end = min()
-#                             # ds_region = {'Start': ds_region_start, 'ds_length (bp)': next_segment['Start']
-                        
-#                         ) or (next_segment['Start'] <= segment['Start'] <= next_segment['End'] # condition b.
-#                               ):
+                        elif (next_segment['Start'] <= segment['Start'] <= next_segment['End'] # condition b.
+                              ):
 
                         
 
@@ -428,186 +478,32 @@ def melt_segments(copyback_df):
 
 if __name__ == '__main__':
     base_dir = '/Users/mfpars/RNAseq_data/fClip-opt_virema/20240313_Virema_wHost/dox1in'
-    samfilename = 'dox1in_recombinations.SAM'
-    reference_name = 'HIV_genome_nonif'
+    samfiles = ['dox1in_recombinations.SAM']
+    references = ['HIV_genome_nonif']
     term = 'segmented'
     
-    segmented = searchSAM(base_dir, samfilename, reference_name, term)
-    
-    # Due to how the filtering worked in above, the copybacks dataframe has
-        # some lines that are the final segment of a read which initially partially mapped
-        # to something other than the desired reference.
-        # To further filter for only reads with multiple segments mapping to the specified reference,
-        # select only rows whose "QNAME" value is duplicated elsewhere in the dataframe.
-        # Identify duplicates in column 'A'
-    duplicates_mask = segmented['QNAME'].duplicated(keep=False)
-    
-    # Filter the dataframe to include only rows where column 'A' has duplicates
-    viral_segments = segmented.loc[duplicates_mask]
-    
-    
-#%% Parse cigar strings to map out reads
-
-    parsed_reads, MINDs = melt_segments(viral_segments)
-    parsed_reads_df = pd.DataFrame(parsed_reads)
-    MINDs_df = pd.DataFrame(MINDs)
-
-#%% Plot copybacks: Plot set up
-
-    import matplotlib.pyplot as plt
-    import seaborn as sns    
-    
-    fontstyle = {'font.sans-serif':'Arial','font.size': 12}
-    sns.set_theme(context='talk', 
-                  style='ticks',
-                  rc = fontstyle)
-    
-    # Define a y-value to space out the reads on the plot
-    y_read = {qname: idx * 36 for idx, qname in enumerate(parsed_reads_df['QNAME'].unique())}
-    parsed_reads_df['y'] = [y_read[row['QNAME']] + 6*int(row['Seg']) for idx, row in parsed_reads_df.iterrows()]
-
-    
-    
-    fig, ax = plt.subplots(figsize=(16,50))
-    colors = sns.color_palette(# palette = 'gist_earth',
-                               n_colors = 5)
-    strandcolor = {True: colors[0], False: 'black'} # set up dict to define color based on RevComp being true or false
-#%%  Plot segments and connectors
-
-    for index, row in parsed_reads_df.iterrows():
-        ax.hlines(y=row['y'], xmin=row['Start'], 
-                   xmax=row['End'], 
-                   color=strandcolor[row['RevComp']],
-                   linewidth = 1,
-                   )
-    
-    for qname in parsed_reads_df['QNAME'].unique():
-        
-        
-        # connect = [] # empty list to populate with segment connector
-        for i in parsed_reads_df.loc[parsed_reads_df['QNAME']==qname]['Seg']: 
-            # TC is total number of segments
-            # FI (index of segment in read) is 1-indexed
-            
-            
-            segment = parsed_reads_df.loc[(parsed_reads_df['QNAME']==qname) &
-                                          (parsed_reads_df['Seg']==i)]
-            
-            nextsegment = parsed_reads_df.loc[(parsed_reads_df['QNAME']==qname) &
-                                          (parsed_reads_df['Seg']==i+1)]
-            
-            if nextsegment.empty: # reached the end of the read
-            
-                # write read index on the plot
-                ax.text(0, segment['y'], segment.index[0],
-                        horizontalalignment='right',
-                        verticalalignment='center',
-                        **{'fontfamily': 'sans-serif','fontsize': 8})
-            
-                continue
-            
-            # find start point of connector: 
-                # the End of a forward strand segment, or
-                # the Start of a reverse-complemented segment
-            revcomp = segment['RevComp'].iloc[0]
-            if revcomp:
-                connectstart = segment['Start'].iloc[0]
-            else:
-                connectstart = segment['End'].iloc[0]
-            
-            # find end point of connector: 
-                # the Start of a forward-stranded next segment, or
-                # the End of a reverse-complemented next segment
-            revcomp_next = nextsegment['RevComp'].iloc[0]
-            if revcomp_next:
-                connectend = nextsegment['End'].iloc[0]
-            else:
-                connectend = nextsegment['Start'].iloc[0]
-            
-            startpoint = {'QNAME': qname,
-                          'pos': connectstart,
-                          'y': segment['y']
-                          }
-            endpoint = {'QNAME': qname,
-                        'pos': connectend,
-                        'y': nextsegment['y']
-                        }
-            connector = pd.DataFrame([startpoint,endpoint])
+    for file in samfiles:
+         samfilename = file
+         
+         for reference_name in references:
+             segmented = searchSAM(base_dir, samfilename, reference_name, 'segmented')
+             segmented['Tags'] = segmented['Tags'].apply(tuple) # covert list of tags to hashable tuples
              
-            ax.plot(connector['pos'],connector['y'],
-                    # linestyle = '--',
-                    dashes = [2,1],
-                    linewidth = 0.5,
-                    color = 'grey',
-                    marker = "none"
-                 )              
-            # connect.append(startpoint)
-            # connect.append(endpoint)
+         # Due to how the filtering worked in above, the copybacks dataframe has
+             # some lines that are the final segment of a read which initially partially mapped
+             # to something other than the desired reference.
+             # To further filter for only reads with multiple segments mapping to the specified reference,
+             # select only rows whose "QNAME" value is duplicated elsewhere in the dataframe.
+             # Identify duplicates in column 'A'
+             duplicates_mask = segmented['QNAME'].duplicated(keep=False)
+             # Filter the dataframe to include only rows where column 'A' has duplicates
+             viral_segments = segmented.loc[duplicates_mask]
+             
+             # Further filter for only reads containing segments with opposite complementarity
+             viral_copybacks = viral_segments.loc[copyback_filter(viral_segments)]
+             
     
-        
-    
-#%% Plot mutation/insertion/deletion events
-    if not MINDs_df.empty:  # if events were identified
-        MINDs_df['y'] = [y_read[row['QNAME']] + 6 * row['Seg'] for idx, row in MINDs_df.iterrows()]
-        
-        # Plot deletions as colored horizontal bars over the aligned segment
-        Deletions = MINDs_df.loc[(MINDs_df['MINDtype']=='D') | (MINDs_df['MINDtype'] == 'N')]
-        for index, row in Deletions.iterrows():
-            ax.hlines(y=row['y'], xmin=row['Start'], xmax=row['End'], 
-                       color=colors[1],
-                       linewidth=1
-                       # ax = ax
-                       )
-        
-        # Plot Insertions and Mutations as point markers over the aligned segment bars
-        MIN = MINDs_df.loc[(MINDs_df['MINDtype'] == 'X') | (MINDs_df['MINDtype'] == 'S')
-                           | (MINDs_df['MINDtype'] == 'I')]
-        
-        sns.scatterplot(data = MIN,
-                        x = 'Start',
-                        y = 'y',
-                        hue = 'MINDtype',
-                        style = 'MINDtype',
-                        hue_order = ['X','S','I'],
-                        markers = {'X': 'X', 'S': 'o', 'I': 's'},
-                        ax = ax,
-                        palette = colors[2:],
-                        s = 5, # adjust size of the MIND markers on the plot
-                        alpha = 0.3, # make transparent to visualize lines underneath
-                        )
-        
-#%% Beautify the plot for visual clarity and save figure
-    from matplotlib.lines import Line2D
-    
-    legend_elements = [Line2D([0], [0], color=colors[0], lw=4, label='Reverse complement mapped'),
-                       Line2D([0], [0], color='black', lw=4, label='Forward strand mapped'),
-                       Line2D([0], [0], color='grey', lw=2, label='Segment connection',
-                              linestyle = '--'),
-                       Line2D([0], [0], color=colors[1], lw=4, label='Deletion'),
-                       Line2D([0], [0], marker='x', color=colors[2], label='Mutation',
-                              markersize=10),
-                       Line2D([0], [0], marker='o', color=colors[3], label='Soft pad',
-                              markersize=10),
-                       Line2D([0], [0], marker='s', color=colors[2], label='Insertion',
-                              markersize=10),
-                       ]
-
-    ax.legend(bbox_to_anchor=(1.02, 1),
-              frameon = False,
-              handles=legend_elements
-              )
-    ax.set_xlabel('Genome Position')
-    ax.set_ylabel('Read')
-    ax.set_yticks([]) # remove arbitrary y-axis ticks and tick-labels, which are just counting arbitrary spacing on the plot
-    sns.despine(ax=ax,top = True, right = True, left = True, bottom = False)
-    ax.spines['bottom'].set_position('zero')
-
-    # Add verticle grid lines at x-tick positions
-    ax.grid(visible = True, axis = 'x', color='grey', linestyle='-', linewidth=2,
-            alpha = 0.2)
-    
-    fig.savefig(os.path.join(base_dir,samfilename[:-4],'Copyback_diagram.pdf'),bbox_inches = 'tight')
-    
-    
-    #%% Save csv file to refer plot read index to read name
-    parsed_reads_df.to_csv(os.path.join(base_dir,samfilename[:-4],'Segmented_reads_parsed.csv'))
+             # Parse cigar strings to map out reads
+             parsed_reads_df, MINDs = melt_segments(viral_copybacks)
+             
+             plotreads(base_dir, samfilename, reference_name, parsed_reads_df, MINDs)
